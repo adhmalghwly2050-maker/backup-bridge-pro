@@ -1,0 +1,12 @@
+{
+  "appId": "com.adhamalghouli.projectmanagement",
+  "appName": "نظام تحليل بيانات المشاريع",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true,
+    "webContentsDebuggingEnabled": true
+  }
+}
