@@ -17969,6 +17969,10 @@ document.addEventListener('DOMContentLoaded', async function() {
     console.log('🚀 بدء تهيئة النظام...');
     
     try {
+        // استعادة + ترحيل بيانات localStorage من/إلى IndexedDB قبل أي قراءة
+        await _lsMirrorRestoreAndMigrate();
+        try { _loadSkillsDB(); } catch (_) {}
+
         await initIndexedDB();
         await loadDatabase();
         loadActualStatusDatabase();
