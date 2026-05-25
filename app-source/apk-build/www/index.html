@@ -6303,22 +6303,99 @@ function clearAllData() {
     return saveDatabase();
 }
 
-function exportBackup() {
+// ─── Helpers: dump / restore raw IndexedDB stores ───
+async function _dumpIDBStore(storeName) {
+    return new Promise((resolve) => {
+        try {
+            if (!indexedDB || !indexedDB.objectStoreNames || !indexedDB.objectStoreNames.contains(storeName)) {
+                return resolve([]);
+            }
+            const tx = indexedDB.transaction([storeName], 'readonly');
+            const store = tx.objectStore(storeName);
+            const out = [];
+            const req = store.openCursor();
+            req.onsuccess = (ev) => {
+                const cur = ev.target.result;
+                if (cur) { out.push({ key: cur.key, value: cur.value }); cur.continue(); }
+                else resolve(out);
+            };
+            req.onerror = () => resolve([]);
+        } catch (e) { resolve([]); }
+    });
+}
+async function _restoreIDBStore(storeName, entries, { clear = true } = {}) {
+    return new Promise((resolve) => {
+        try {
+            if (!indexedDB || !Array.isArray(entries)) return resolve(false);
+            if (!indexedDB.objectStoreNames.contains(storeName)) return resolve(false);
+            const tx = indexedDB.transaction([storeName], 'readwrite');
+            const store = tx.objectStore(storeName);
+            const finish = () => {
+                entries.forEach(e => {
+                    try {
+                        if (store.keyPath) store.put(e.value);
+                        else store.put(e.value, e.key);
+                    } catch(_) {}
+                });
+            };
+            if (clear) {
+                const cr = store.clear();
+                cr.onsuccess = finish;
+                cr.onerror = finish;
+            } else { finish(); }
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+            tx.onabort = () => resolve(false);
+        } catch (e) { resolve(false); }
+    });
+}
+
+async function exportBackup() {
+    const [geoDataEntries, executionStreamsEntries, streamHistoryEntries, selectionStatsEntries] = await Promise.all([
+        _dumpIDBStore('geoData'),
+        _dumpIDBStore('executionStreams'),
+        _dumpIDBStore('streamHistory'),
+        _dumpIDBStore('selectionStats')
+    ]);
+
+    let customActualStatuses = [];
+    try {
+        const opts = (typeof ActualStatusManager !== 'undefined' && ActualStatusManager.statusOptions) ? ActualStatusManager.statusOptions : [];
+        customActualStatuses = opts.filter(o => (o.label || '').startsWith('🆕'));
+    } catch(_) {}
+
     const fullBackup = {
         projectsDatabase: projectsDatabase,
         actualStatusDatabase: actualStatusDatabase,
         cpmProjectsData: typeof cpmProjectsData !== 'undefined' ? cpmProjectsData : {},
-        startReasonsDatabase: startReasonsDatabase || {},
-        evmExecActions: evmExecActions || {},
-        evmAdminNotes: evmAdminNotes || {},
+        startReasonsDatabase: typeof startReasonsDatabase !== 'undefined' ? (startReasonsDatabase || {}) : {},
+        evmExecActions: typeof evmExecActions !== 'undefined' ? (evmExecActions || {}) : {},
+        evmAdminNotes: typeof evmAdminNotes !== 'undefined' ? (evmAdminNotes || {}) : {},
+
+        timelinePlanningDatabase: typeof timelinePlanningDatabase !== 'undefined' ? (timelinePlanningDatabase || {}) : {},
+
+        executionModeDefaultsByType: typeof DEFAULT_EXECUTION_MODE_BY_TYPE !== 'undefined' ? (DEFAULT_EXECUTION_MODE_BY_TYPE || {}) : {},
+        executionModesDatabase: typeof executionModesDatabase !== 'undefined' ? (executionModesDatabase || {}) : {},
+        schedulingStatusDatabase: typeof schedulingStatusDatabase !== 'undefined' ? (schedulingStatusDatabase || {}) : {},
+        supervisorSkillsDatabase: typeof supervisorSkillsDatabase !== 'undefined' ? (supervisorSkillsDatabase || {}) : {},
+
+        customActualStatuses: customActualStatuses,
+
+        idbStores: {
+            geoData: geoDataEntries,
+            executionStreams: executionStreamsEntries,
+            streamHistory: streamHistoryEntries,
+            selectionStats: selectionStatsEntries
+        },
+
         exportedAt: new Date().toISOString(),
-        version: "2.3"
+        version: "3.0"
     };
-    
+
     const dataStr = JSON.stringify(fullBackup);
     _downloadDataAsFile(dataStr, `backup_${new Date().toISOString().split('T')[0]}.json`, 'application/json');
-    
-    showNotification('تم تصدير النسخة الاحتياطية الكاملة', 'success');
+
+    showNotification('تم تصدير النسخة الاحتياطية الكاملة (يشمل الخطة الزمنية وإدارة الموقع)', 'success');
 }
 
 async function importBackup(file) {
@@ -6327,24 +6404,64 @@ async function importBackup(file) {
         reader.onload = async (e) => {
             try {
                 const data = JSON.parse(e.target.result);
-                if (data.projectsDatabase) {
-                    projectsDatabase = data.projectsDatabase;
-                    actualStatusDatabase = data.actualStatusDatabase || {};
-                    
-                    if (data.cpmProjectsData) {
-                        cpmProjectsData = data.cpmProjectsData;
-                        await saveAppData('cpmProjectsData', cpmProjectsData);
-                    }
-                    
-                    startReasonsDatabase = data.startReasonsDatabase || {};
-                    evmExecActions = data.evmExecActions || {};
-                    evmAdminNotes = data.evmAdminNotes || {};
-                    
-                    await saveDatabase();
-                    showNotification('تم استيراد النسخة الاحتياطية بنجاح', 'success');
-                } else {
-                    reject(new Error('ملف غير صالح'));
+                if (!data.projectsDatabase) { reject(new Error('ملف غير صالح')); return; }
+
+                projectsDatabase = data.projectsDatabase;
+                actualStatusDatabase = data.actualStatusDatabase || {};
+
+                if (data.cpmProjectsData) {
+                    cpmProjectsData = data.cpmProjectsData;
+                    await saveAppData('cpmProjectsData', cpmProjectsData);
                 }
+
+                if (typeof startReasonsDatabase !== 'undefined') startReasonsDatabase = data.startReasonsDatabase || {};
+                if (typeof evmExecActions !== 'undefined') evmExecActions = data.evmExecActions || {};
+                if (typeof evmAdminNotes !== 'undefined') evmAdminNotes = data.evmAdminNotes || {};
+
+                if (data.timelinePlanningDatabase !== undefined) {
+                    if (typeof timelinePlanningDatabase !== 'undefined') timelinePlanningDatabase = data.timelinePlanningDatabase || {};
+                    await saveAppData('timelinePlanningDatabase', data.timelinePlanningDatabase || {});
+                }
+
+                if (data.executionModeDefaultsByType !== undefined) {
+                    if (typeof DEFAULT_EXECUTION_MODE_BY_TYPE !== 'undefined') {
+                        try { Object.keys(DEFAULT_EXECUTION_MODE_BY_TYPE).forEach(k => delete DEFAULT_EXECUTION_MODE_BY_TYPE[k]); } catch(_) {}
+                        try { Object.assign(DEFAULT_EXECUTION_MODE_BY_TYPE, data.executionModeDefaultsByType || {}); } catch(_) {}
+                    }
+                    await saveAppData('executionModeDefaultsByType', data.executionModeDefaultsByType || {});
+                }
+                if (data.executionModesDatabase !== undefined) {
+                    if (typeof executionModesDatabase !== 'undefined') executionModesDatabase = data.executionModesDatabase || {};
+                    await saveAppData('executionModesDatabase', data.executionModesDatabase || {});
+                }
+                if (data.schedulingStatusDatabase !== undefined) {
+                    if (typeof schedulingStatusDatabase !== 'undefined') schedulingStatusDatabase = data.schedulingStatusDatabase || {};
+                    await saveAppData('schedulingStatusDatabase', data.schedulingStatusDatabase || {});
+                }
+                if (data.supervisorSkillsDatabase !== undefined) {
+                    if (typeof supervisorSkillsDatabase !== 'undefined') supervisorSkillsDatabase = data.supervisorSkillsDatabase || {};
+                    try { localStorage.setItem('supervisorSkillsDB', JSON.stringify(data.supervisorSkillsDatabase || {})); } catch(_) {}
+                }
+
+                if (Array.isArray(data.customActualStatuses) && typeof ActualStatusManager !== 'undefined' && Array.isArray(ActualStatusManager.statusOptions)) {
+                    data.customActualStatuses.forEach(opt => {
+                        if (opt && opt.value && !ActualStatusManager.statusOptions.some(o => o.value === opt.value)) {
+                            ActualStatusManager.statusOptions.push(opt);
+                        }
+                    });
+                    try { await saveAppData('customActualStatuses', ActualStatusManager.statusOptions.filter(o => (o.label || '').startsWith('🆕'))); } catch(_) {}
+                }
+
+                if (data.idbStores && typeof data.idbStores === 'object') {
+                    await _restoreIDBStore('geoData',          data.idbStores.geoData          || []);
+                    await _restoreIDBStore('executionStreams', data.idbStores.executionStreams || []);
+                    await _restoreIDBStore('streamHistory',    data.idbStores.streamHistory    || []);
+                    await _restoreIDBStore('selectionStats',   data.idbStores.selectionStats   || []);
+                    try { if (typeof loadGeoDatabase === 'function') await loadGeoDatabase(); } catch(_) {}
+                }
+
+                await saveDatabase();
+                showNotification('تم استيراد النسخة الاحتياطية الكاملة بنجاح (يشمل الخطة الزمنية وإدارة الموقع)', 'success');
                 resolve(true);
             } catch (error) {
                 console.error('خطأ في استيراد النسخة:', error);
