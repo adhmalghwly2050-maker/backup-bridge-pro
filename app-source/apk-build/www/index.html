@@ -18035,6 +18035,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     console.log('🚀 بدء تهيئة النظام...');
     
     try {
+        await _lsMirrorRestoreAndMigrate();
+        try { _loadSkillsDB(); } catch (_) {}
+
         await initIndexedDB();
         await loadDatabase();
         loadActualStatusDatabase();
