@@ -6079,6 +6079,84 @@ async function initIndexedDB() {
     });
 }
 
+/* ============================================================
+   LocalStorage ↔ IndexedDB Mirror
+   ترحيل تلقائي لمفاتيح localStorage إلى IndexedDB مع الإبقاء
+   على نسخة في localStorage للتوافق الخلفي.
+   ============================================================ */
+const LS_MIRROR_KEYS = ['theme', 'supervisorSkillsDB', 'projectsDatabase_backup'];
+const LS_MIRROR_DB = 'LSMirrorDB';
+const LS_MIRROR_STORE = 'kv';
+
+function _openLSMirror() {
+    return new Promise((resolve, reject) => {
+        try {
+            const req = window.indexedDB.open(LS_MIRROR_DB, 1);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(LS_MIRROR_STORE)) {
+                    db.createObjectStore(LS_MIRROR_STORE);
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        } catch (e) { reject(e); }
+    });
+}
+async function _lsMirrorSet(key, value) {
+    try {
+        const db = await _openLSMirror();
+        return await new Promise((resolve) => {
+            const tx = db.transaction(LS_MIRROR_STORE, 'readwrite');
+            const store = tx.objectStore(LS_MIRROR_STORE);
+            if (value === null || value === undefined) store.delete(key);
+            else store.put(value, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+        });
+    } catch (e) { return false; }
+}
+async function _lsMirrorGet(key) {
+    try {
+        const db = await _openLSMirror();
+        return await new Promise((resolve) => {
+            const tx = db.transaction(LS_MIRROR_STORE, 'readonly');
+            const req = tx.objectStore(LS_MIRROR_STORE).get(key);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(undefined);
+        });
+    } catch (e) { return undefined; }
+}
+async function _lsMirrorRestoreAndMigrate() {
+    for (const k of LS_MIRROR_KEYS) {
+        try {
+            const lsVal = localStorage.getItem(k);
+            const idbVal = await _lsMirrorGet(k);
+            if (lsVal !== null) {
+                if (idbVal !== lsVal) await _lsMirrorSet(k, lsVal);
+            } else if (typeof idbVal === 'string') {
+                try { localStorage.setItem(k, idbVal); } catch (_) {}
+            }
+        } catch (_) {}
+    }
+}
+(function installLSMirror() {
+    try {
+        const _set = localStorage.setItem.bind(localStorage);
+        const _rem = localStorage.removeItem.bind(localStorage);
+        localStorage.setItem = function (k, v) {
+            const r = _set(k, v);
+            if (LS_MIRROR_KEYS.includes(k)) { _lsMirrorSet(k, String(v)); }
+            return r;
+        };
+        localStorage.removeItem = function (k) {
+            const r = _rem(k);
+            if (LS_MIRROR_KEYS.includes(k)) { _lsMirrorSet(k, null); }
+            return r;
+        };
+    } catch (_) {}
+})();
+
 async function loadFromIndexedDB() {
     return new Promise((resolve, reject) => {
         if (!indexedDB) return reject(new Error('قاعدة البيانات غير مهيأة'));
